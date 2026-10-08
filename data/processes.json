@@ -1,0 +1,502 @@
+const stepLabels = {
+  'ticket-create': 'Ticket erstellen',
+  'ticket-edit': 'Ticketfeld ändern',
+  'title-edit': 'Titel ändern',
+  'note': 'Hinweis',
+  'external-task': 'Externes System',
+  'phone-in': 'Telefon eingehend',
+  'phone-out': 'Telefon ausgehend',
+  'email-in': 'E-Mail eingehend',
+  'email-out': 'E-Mail ausgehend',
+  'link': 'Verknüpfung',
+  'close': 'Ticket schließen',
+};
+
+const state = {
+  process: null,
+  config: null,
+};
+
+function showToast(message, isError = false) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = message;
+  el.style.background = isError ? '#a33a3a' : '#1f2a37';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+async function apiRequest(payload) {
+  const response = await fetch(window.location.href, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...payload, csrf: window.APP.csrf }),
+  });
+  const json = await response.json();
+  if (!response.ok || !json.ok) {
+    throw new Error(json.error || 'Ein Fehler ist aufgetreten.');
+  }
+  return json;
+}
+
+function makeFieldInput(field, value = '') {
+  if (field.type === 'select') {
+    const select = document.createElement('select');
+    (field.values || []).forEach((item) => {
+      const option = document.createElement('option');
+      option.value = item;
+      option.textContent = item;
+      if (item === value) option.selected = true;
+      select.appendChild(option);
+    });
+    return select;
+  }
+
+  const input = document.createElement('input');
+  input.type = field.type === 'number' ? 'number' : 'text';
+  input.value = value || '';
+  return input;
+}
+
+function defaultStep(action = 'note') {
+  return {
+    id: 'step-' + crypto.randomUUID(),
+    action,
+    subject: '',
+    body: '',
+    fields: [],
+    links: [],
+    meta: {
+      system: '',
+      url: '',
+      address: '',
+      tasks: [],
+      condition: { variable: '', operator: 'always', value: '' },
+    },
+  };
+}
+
+function emptyProcess() {
+  return {
+    id: '',
+    name: '',
+    description: '',
+    yamlName: '',
+    published: true,
+    customerMarks: [],
+    variables: [],
+    steps: [
+      {
+        id: 'step-' + crypto.randomUUID(),
+        action: 'ticket-create',
+        subject: '',
+        body: '',
+        fields: [
+          { id: 'field-' + crypto.randomUUID(), key: 'Type', value: '', enabled: true },
+          { id: 'field-' + crypto.randomUUID(), key: 'Queue', value: '', enabled: true },
+          { id: 'field-' + crypto.randomUUID(), key: 'Service', value: '', enabled: true },
+        ],
+        links: [],
+        meta: {
+          system: '',
+          url: '',
+          address: '',
+          tasks: [],
+          condition: { variable: '', operator: 'always', value: '' },
+        },
+      },
+    ],
+  };
+}
+
+function ensureRequiredFields(step) {
+  const required = ['Type', 'Queue', 'Service'];
+  const existing = step.fields || [];
+  required.forEach((key) => {
+    if (!existing.some((field) => field.key === key)) {
+      existing.push({ id: 'field-' + crypto.randomUUID(), key, value: '', enabled: true });
+    }
+  });
+}
+
+function renderAdminList() {
+  const root = document.getElementById('admin-list');
+  if (!root) return;
+
+  const processes = window.APP.processes || [];
+  if (!processes.length) {
+    root.innerHTML = '<div class="empty-state">Keine Prozesse vorhanden.</div>';
+    return;
+  }
+
+  root.innerHTML = '';
+  processes.forEach((process) => {
+    const row = document.createElement('div');
+    row.className = 'list-item';
+    row.innerHTML = `
+      <strong>${process.name || 'Unbenannter Prozess'}</strong>
+      <span>${process.description || 'Keine Beschreibung.'}</span>
+      <span>${(process.steps || []).length} Schritte</span>
+      <div class="action-row">
+        <a class="button" href="/?page=editor&id=${encodeURIComponent(process.id || '')}">Bearbeiten</a>
+        <button type="button" class="button danger-btn" data-delete="${process.id || ''}">Löschen</button>
+      </div>
+    `;
+    root.appendChild(row);
+  });
+
+  root.querySelectorAll('[data-delete]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.getAttribute('data-delete');
+      if (!id) return;
+      if (!confirm('Prozess wirklich löschen?')) return;
+      try {
+        await apiRequest({ op: 'delete-process', id });
+        window.location.reload();
+      } catch (error) {
+        showToast(error.message, true);
+      }
+    });
+  });
+}
+
+function renderConfigList() {
+  const root = document.getElementById('config-list');
+  if (!root) return;
+
+  const fields = window.APP.config.fields || [];
+  root.innerHTML = '';
+
+  fields.forEach((field, index) => {
+    const item = document.createElement('div');
+    item.className = 'list-item';
+    item.innerHTML = `
+      <label>
+        <span>Schlüssel</span>
+        <input data-index="${index}" data-key="key" value="${field.key || ''}">
+      </label>
+      <label>
+        <span>Bezeichnung</span>
+        <input data-index="${index}" data-key="label" value="${field.label || ''}">
+      </label>
+      <label>
+        <span>Typ</span>
+        <select data-index="${index}" data-key="type">
+          <option value="text" ${field.type === 'text' ? 'selected' : ''}>text</option>
+          <option value="select" ${field.type === 'select' ? 'selected' : ''}>select</option>
+          <option value="number" ${field.type === 'number' ? 'selected' : ''}>number</option>
+        </select>
+      </label>
+      <button type="button" class="button danger-btn" data-remove-field="${index}">Entfernen</button>
+    `;
+    root.appendChild(item);
+  });
+
+  const addButton = document.createElement('button');
+  addButton.type = 'button';
+  addButton.className = 'button primary';
+  addButton.textContent = 'Feld hinzufügen';
+  addButton.addEventListener('click', () => {
+    window.APP.config.fields.push({
+      id: 'field-' + crypto.randomUUID(),
+      key: '',
+      label: '',
+      type: 'text',
+      values: [],
+      defaultValue: '',
+      required: false,
+    });
+    renderConfigList();
+  });
+  root.appendChild(addButton);
+
+  root.querySelectorAll('[data-index]').forEach((input) => {
+    input.addEventListener('input', () => {
+      const index = Number(input.dataset.index);
+      const key = input.dataset.key;
+      const value = input.value;
+      if (!window.APP.config.fields[index]) return;
+      window.APP.config.fields[index][key] = value;
+    });
+  });
+
+  root.querySelectorAll('[data-remove-field]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const index = Number(button.dataset.removeField);
+      window.APP.config.fields.splice(index, 1);
+      renderConfigList();
+    });
+  });
+
+  document.getElementById('save-config')?.addEventListener('click', async () => {
+    try {
+      const data = {
+        fields: window.APP.config.fields
+          .filter((field) => String(field.key || '').trim())
+          .map((field) => ({
+            id: field.id || 'field-' + crypto.randomUUID(),
+            key: String(field.key || '').trim(),
+            label: String(field.label || field.key || '').trim(),
+            type: field.type || 'text',
+            values: Array.isArray(field.values) ? field.values : [],
+            defaultValue: field.defaultValue || '',
+            required: !!field.required,
+          })),
+        linkTypes: window.APP.config.linkTypes || ['Normal', 'ParentChild'],
+      };
+      await apiRequest({ op: 'save-config', configuration: data });
+      showToast('Ticketfelder gespeichert.');
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+}
+
+function renderEditorSteps() {
+  const root = document.getElementById('editor-steps');
+  if (!root) return;
+  const process = state.process;
+  if (!process) return;
+
+  root.innerHTML = '';
+
+  process.steps.forEach((step, index) => {
+    const card = document.createElement('div');
+    card.className = 'step-card';
+
+    const header = document.createElement('div');
+    header.className = 'step-header';
+    header.innerHTML = `<strong>${index + 1}. ${stepLabels[step.action] || 'Schritt'}</strong>`;
+
+    const actionSelect = document.createElement('select');
+    Object.entries(stepLabels).forEach(([key, label]) => {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = label;
+      if (step.action === key) option.selected = true;
+      actionSelect.appendChild(option);
+    });
+    actionSelect.addEventListener('change', () => {
+      step.action = actionSelect.value;
+      renderEditorSteps();
+    });
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.textContent = 'Löschen';
+    removeButton.classList.add('button');
+    removeButton.addEventListener('click', () => {
+      if (process.steps.length === 1) {
+        showToast('Der letzte Schritt darf nicht gelöscht werden.', true);
+        return;
+      }
+      process.steps.splice(index, 1);
+      renderEditorSteps();
+    });
+
+    header.appendChild(actionSelect);
+    header.appendChild(removeButton);
+    card.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'step-body';
+
+    const subjectWrap = document.createElement('div');
+    subjectWrap.className = 'form-grid';
+    const subjectLabel = document.createElement('label');
+    subjectLabel.innerHTML = '<span>Betreff</span>';
+    const subjectInput = document.createElement('textarea');
+    subjectInput.value = step.subject || '';
+    subjectInput.addEventListener('input', () => {
+      step.subject = subjectInput.value;
+    });
+    subjectLabel.appendChild(subjectInput);
+    subjectWrap.appendChild(subjectLabel);
+    body.appendChild(subjectWrap);
+
+    const bodyTextWrap = document.createElement('div');
+    bodyTextWrap.className = 'form-grid';
+    const bodyLabel = document.createElement('label');
+    bodyLabel.innerHTML = '<span>Text</span>';
+    const bodyInput = document.createElement('textarea');
+    bodyInput.value = step.body || '';
+    bodyInput.addEventListener('input', () => {
+      step.body = bodyInput.value;
+    });
+    bodyLabel.appendChild(bodyInput);
+    bodyTextWrap.appendChild(bodyLabel);
+    body.appendChild(bodyTextWrap);
+
+    ensureRequiredFields(step);
+    const fieldsWrap = document.createElement('div');
+    fieldsWrap.className = 'form-grid';
+    step.fields.forEach((field) => {
+      const def = (window.APP.config.fields || []).find((item) => item.key === field.key) || { key: field.key, label: field.key, type: 'text', values: [] };
+      const label = document.createElement('label');
+      label.innerHTML = `<span>${def.label || field.key}</span>`;
+      const control = makeFieldInput(def, field.value || '');
+      control.addEventListener('input', () => {
+        field.value = control.value;
+      });
+      label.appendChild(control);
+      fieldsWrap.appendChild(label);
+    });
+    body.appendChild(fieldsWrap);
+
+    card.appendChild(body);
+    root.appendChild(card);
+  });
+}
+
+function initEditor() {
+  const process = window.APP.current && window.APP.current.id ? structuredClone(window.APP.current) : emptyProcess();
+  state.process = process;
+
+  const nameInput = document.getElementById('process-name');
+  const yamlInput = document.getElementById('process-yaml');
+  const descriptionInput = document.getElementById('process-description');
+  const publishedInput = document.getElementById('process-published');
+
+  nameInput.value = process.name || '';
+  yamlInput.value = process.yamlName || '';
+  descriptionInput.value = process.description || '';
+  publishedInput.value = process.published ? '1' : '0';
+
+  nameInput.addEventListener('input', () => { process.name = nameInput.value; });
+  yamlInput.addEventListener('input', () => { process.yamlName = yamlInput.value; });
+  descriptionInput.addEventListener('input', () => { process.description = descriptionInput.value; });
+  publishedInput.addEventListener('change', () => { process.published = publishedInput.value === '1'; });
+
+  renderEditorSteps();
+
+  document.getElementById('add-step')?.addEventListener('click', () => {
+    state.process.steps.push(defaultStep('note'));
+    renderEditorSteps();
+  });
+
+  document.getElementById('save-process')?.addEventListener('click', async () => {
+    try {
+      if (!state.process.name.trim()) {
+        throw new Error('Prozessname fehlt.');
+      }
+      const payload = {
+        id: state.process.id || 'process-' + crypto.randomUUID(),
+        name: state.process.name,
+        description: state.process.description || '',
+        yamlName: state.process.yamlName || '',
+        published: state.process.published,
+        customerMarks: [],
+        variables: state.process.variables || [],
+        steps: state.process.steps,
+        updatedAt: new Date().toISOString(),
+      };
+      const result = await apiRequest({ op: 'save-process', process: payload });
+      state.process.id = result.id || payload.id;
+      showToast('Prozess gespeichert.');
+      setTimeout(() => {
+        window.location.href = '/?page=admin';
+      }, 800);
+    } catch (error) {
+      showToast(error.message, true);
+    }
+  });
+}
+
+function renderViewSteps() {
+  const root = document.getElementById('view-steps');
+  if (!root) return;
+  const process = window.APP.current;
+  if (!process) return;
+
+  root.innerHTML = '';
+  (process.steps || []).forEach((step, index) => {
+    const card = document.createElement('article');
+    card.className = 'step-card';
+    const header = document.createElement('div');
+    header.className = 'step-header';
+    header.innerHTML = `<strong>${index + 1}. ${stepLabels[step.action] || 'Schritt'}</strong>`;
+    card.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'step-body';
+    if (step.subject) {
+      const p = document.createElement('p');
+      p.innerHTML = `<strong>Betreff:</strong> ${step.subject.replace(/\n/g, '<br>')}`;
+      body.appendChild(p);
+    }
+    if (step.body) {
+      const p = document.createElement('p');
+      p.innerHTML = `<strong>Text:</strong> ${step.body.replace(/\n/g, '<br>')}`;
+      body.appendChild(p);
+    }
+    if (step.fields?.length) {
+      const ul = document.createElement('ul');
+      step.fields.forEach((field) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<strong>${field.key}:</strong> ${field.value || ''}`;
+        ul.appendChild(li);
+      });
+      body.appendChild(ul);
+    }
+    card.appendChild(body);
+    root.appendChild(card);
+  });
+}
+
+function bindExport() {
+  const button = document.getElementById('export-all');
+  if (!button) return;
+  button.addEventListener('click', () => {
+    const data = {
+      schemaVersion: 3,
+      configuration: window.APP.config,
+      processes: window.APP.processes,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2) + '\n'], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'znuny-processes.json';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+}
+
+function bindImport() {
+  const input = document.getElementById('import-json');
+  if (!input) return;
+  input.addEventListener('change', async () => {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    try {
+      const json = JSON.parse(await file.text());
+      const result = await apiRequest({ op: 'import-json', data: json });
+      showToast(`${result.count || 0} Prozesse importiert.`);
+      setTimeout(() => window.location.reload(), 800);
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      input.value = '';
+    }
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const page = document.body.dataset.page;
+  if (page === 'admin') {
+    renderAdminList();
+    bindExport();
+    bindImport();
+  }
+  if (page === 'config') {
+    renderConfigList();
+  }
+  if (page === 'editor') {
+    initEditor();
+  }
+  if (page === 'view') {
+    renderViewSteps();
+  }
+});
